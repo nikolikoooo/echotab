@@ -1,16 +1,17 @@
 "use client";
+
 import { useEffect, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
-import { motion, AnimatePresence } from "framer-motion";
 
 type Entry = { id: string; content: string; created_at: string };
 
 export default function Home() {
-  const [session, setSession] = useState<any>(null);
-  const [text, setText] = useState("");
+  const [session, setSession] = useState<Session | null>(null);
+  const [text, setText] = useState<string>("");
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [sending, setSending] = useState<boolean>(false);
 
   useEffect(() => {
     (async () => {
@@ -27,7 +28,7 @@ export default function Home() {
         const sess = await supabaseBrowser.auth.getSession();
         const access = sess.data.session?.access_token;
 
-        function getMondayOfThisWeek() {
+        function getMondayOfThisWeek(): string {
           const now = new Date();
           const day = now.getDay();
           const diff = now.getDate() - day + (day === 0 ? -6 : 1); // Monday
@@ -44,19 +45,18 @@ export default function Home() {
           .limit(1);
 
         if (!existing || existing.length === 0) {
-          const res = await fetch("/api/weekly", {
+          await fetch("/api/weekly", {
             method: "POST",
             headers: access ? { "sb-access-token": access } : {},
           });
-          if (res.ok) console.log("✅ Auto-generated reflection for week", weekStart);
         }
-      } catch (err) {
-        console.warn("auto reflection error", err);
+      } catch {
+        // ignore background errors for MVP
       }
     })();
   }, []);
 
-  async function loadEntries() {
+  async function loadEntries(): Promise<void> {
     const { data, error } = await supabaseBrowser
       .from("entries")
       .select("id, content, created_at")
@@ -66,7 +66,7 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function send() {
+  async function send(): Promise<void> {
     if (!text.trim() || sending) return;
     setSending(true);
     const sess = await supabaseBrowser.auth.getSession();
@@ -82,8 +82,8 @@ export default function Home() {
       setText("");
       await loadEntries();
     } else {
-      const j = await res.json().catch(() => ({}));
-      alert("Save failed: " + (j.error || res.statusText));
+      const j = await res.json().catch(() => ({} as Record<string, unknown>));
+      alert("Save failed: " + (String((j as { error?: string }).error) || res.statusText));
     }
     setSending(false);
   }
@@ -92,52 +92,49 @@ export default function Home() {
 
   return (
     <main>
-      <div className="mb-4">
-        <p className="text-sm text-zinc-400">Say one honest sentence about today. I’ll remember.</p>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold">EchoTab</h1>
+        <button
+          onClick={async () => {
+            await supabaseBrowser.auth.signOut();
+            window.location.href = "/login";
+          }}
+          className="text-xs text-zinc-400 hover:text-zinc-200"
+        >
+          Sign out
+        </button>
       </div>
 
       <div className="flex gap-2 mb-3">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="e.g. Felt anxious but proud I went to the gym."
-          className="flex-1 rounded-lg bg-zinc-900 border border-zinc-800 p-3"
-          onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+          placeholder="Say one honest sentence about today…"
+          className="flex-1 rounded-md bg-zinc-900 border border-zinc-800 p-3"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void send();
+          }}
         />
         <button
-          onClick={send}
+          onClick={() => void send()}
           disabled={sending}
-          className={`rounded-lg px-4 ${sending ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"}`}
+          className="rounded-md bg-white/10 hover:bg-white/20 px-4"
         >
           {sending ? "Sending…" : "Send"}
         </button>
       </div>
+      <p className="text-xs text-zinc-500 mb-4">Tip: one message a day is enough. I’ll remember.</p>
 
       {loading ? (
         <p className="text-zinc-500 text-sm">Loading…</p>
-      ) : entries.length === 0 ? (
-        <div className="text-sm text-zinc-500 border border-dashed border-zinc-800 rounded-lg p-6">
-          No entries yet. Write your first thought above.
-        </div>
       ) : (
         <ul className="space-y-3">
-          <AnimatePresence>
-            {entries.map((e) => (
-              <motion.li
-                key={e.id}
-                initial={{ y: 8, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: -8, opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 p-3"
-              >
-                <p className="whitespace-pre-wrap leading-6">{e.content}</p>
-                <div className="mt-2 text-xs text-zinc-500">
-                  {new Date(e.created_at).toLocaleString()}
-                </div>
-              </motion.li>
-            ))}
-          </AnimatePresence>
+          {entries.map((e) => (
+            <li key={e.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+              <p className="whitespace-pre-wrap">{e.content}</p>
+              <div className="mt-2 text-xs text-zinc-500">{new Date(e.created_at).toLocaleString()}</div>
+            </li>
+          ))}
         </ul>
       )}
 
@@ -150,11 +147,11 @@ export default function Home() {
               method: "POST",
               headers: access ? { "sb-access-token": access } : {},
             });
-            const j = await res.json().catch(() => ({}));
+            const j = await res.json().catch(() => ({} as Record<string, unknown>));
             if (res.ok) alert("Weekly reflection generated. Check Reflections.");
-            else alert("Error: " + (j.error || res.statusText));
+            else alert("Error: " + (String((j as { error?: string }).error) || res.statusText));
           }}
-          className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm"
+          className="rounded-md bg-white/10 hover:bg-white/20 px-4 py-2 text-sm"
         >
           Generate Weekly Reflection
         </button>

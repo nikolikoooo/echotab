@@ -1,19 +1,23 @@
 "use client";
+
 import { useEffect, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
+
+type MoodRollup = { avg_valence?: number; top_labels?: string[] } | null;
 
 type Reflection = {
   id: string;
   week_start: string;
   summary: string;
   highlights: string[];
-  mood_rollup: { avg_valence?: number; top_labels?: string[] } | null;
+  mood_rollup: MoodRollup;
 };
 
 export default function ReflectionsPage() {
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [reflections, setReflections] = useState<Reflection[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
     (async () => {
