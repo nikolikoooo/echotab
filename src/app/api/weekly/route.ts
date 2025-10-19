@@ -15,8 +15,18 @@ function startOfWeekUTC(d = new Date()): Date {
   return start;
 }
 
+function getAccessToken(req: NextRequest): string | null {
+  const h1 = req.headers.get("sb-access-token");
+  if (h1) return h1;
+  const auth = req.headers.get("authorization");
+  if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
+  const cookieToken = req.cookies.get("sb-access-token")?.value;
+  if (cookieToken) return cookieToken;
+  return null;
+}
+
 export async function POST(req: NextRequest) {
-  const accessToken = req.headers.get("sb-access-token");
+  const accessToken = getAccessToken(req);
   if (!accessToken) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
 
   const sb = createClient(
@@ -30,11 +40,12 @@ export async function POST(req: NextRequest) {
 
   // Week window (Mon..Sun UTC)
   const weekStart = startOfWeekUTC();
+  const weekKey = weekStart.toISOString().slice(0, 10);
   const fromISO = weekStart.toISOString();
   const to = new Date(weekStart); to.setUTCDate(to.getUTCDate() + 7);
   const toISO = to.toISOString();
 
-  // 1) Load entries
+  // 1) Load entries for this week
   const { data: entries, error: eErr } = await sb
     .from("entries")
     .select("content, created_at")
@@ -47,7 +58,6 @@ export async function POST(req: NextRequest) {
   if (!entries?.length) return NextResponse.json({ ok: true, note: "no entries this week" });
 
   // 2) Once-per-week: return existing reflection if present
-  const weekKey = weekStart.toISOString().slice(0, 10);
   const { data: existingThisWeek } = await sb
     .from("reflections")
     .select("*")
