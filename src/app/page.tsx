@@ -6,6 +6,8 @@ import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 type Entry = { id: string; content: string; created_at: string };
 
+const MAX_CHARS = 1000;
+
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [text, setText] = useState<string>("");
@@ -23,7 +25,7 @@ export default function Home() {
       setSession(data.session);
       await loadEntries();
 
-      // --- Auto-generate weekly reflection if needed ---
+      // --- Auto-generate weekly reflection if needed (server has guards) ---
       try {
         const sess = await supabaseBrowser.auth.getSession();
         const access = sess.data.session?.access_token;
@@ -51,7 +53,7 @@ export default function Home() {
           });
         }
       } catch {
-        // ignore background errors for MVP
+        // Silent fail ok for background work
       }
     })();
   }, []);
@@ -62,12 +64,22 @@ export default function Home() {
       .select("id, content, created_at")
       .order("created_at", { ascending: false })
       .limit(50);
+
     if (!error) setEntries((data as Entry[]) || []);
     setLoading(false);
   }
 
   async function send(): Promise<void> {
-    if (!text.trim() || sending) return;
+    if (sending) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // Client-side safety for cost control and UX
+    if (trimmed.length > MAX_CHARS) {
+      alert(`Max ${MAX_CHARS} characters. You’re at ${trimmed.length}. Please shorten your entry.`);
+      return;
+    }
+
     setSending(true);
     const sess = await supabaseBrowser.auth.getSession();
     const access = sess.data.session?.access_token;
@@ -75,55 +87,77 @@ export default function Home() {
     const res = await fetch("/api/echo", {
       method: "POST",
       headers: access ? { "sb-access-token": access } : {},
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text: trimmed }),
     });
 
     if (res.ok) {
       setText("");
       await loadEntries();
     } else {
-      const j = await res.json().catch(() => ({} as Record<string, unknown>));
-      alert("Save failed: " + (String((j as { error?: string }).error) || res.statusText));
+      // Handle specific server-side limits (e.g., 413 from our safety check)
+      if (res.status === 413) {
+        alert(`Your entry is too long. Max is ${MAX_CHARS} characters.`);
+      } else {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        alert("Save failed: " + (j.error || res.statusText));
+      }
     }
     setSending(false);
   }
 
+  async function signOut() {
+    await supabaseBrowser.auth.signOut();
+    window.location.href = "/login";
+  }
+
   if (!session) return null;
+
+  const overLimit = text.length > MAX_CHARS;
 
   return (
     <main>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold">EchoTab</h1>
-        <button
-          onClick={async () => {
-            await supabaseBrowser.auth.signOut();
-            window.location.href = "/login";
-          }}
-          className="text-xs text-zinc-400 hover:text-zinc-200"
-        >
+        <button onClick={signOut} className="text-xs text-zinc-400 hover:text-zinc-200">
           Sign out
         </button>
       </div>
 
-      <div className="flex gap-2 mb-3">
+      <div className="flex gap-2 mb-2">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Say one honest sentence about today…"
-          className="flex-1 rounded-md bg-zinc-900 border border-zinc-800 p-3"
+          placeholder="One honest sentence about today…"
+          className={`flex-1 rounded-md bg-zinc-900 border p-3 ${
+            overLimit ? "border-rose-500" : "border-zinc-800"
+          }`}
+          maxLength={MAX_CHARS} // hard cap in UI
           onKeyDown={(e) => {
             if (e.key === "Enter") void send();
           }}
         />
         <button
           onClick={() => void send()}
-          disabled={sending}
-          className="rounded-md bg-white/10 hover:bg-white/20 px-4"
+          disabled={sending || overLimit}
+          className={`rounded-md px-4 ${
+            sending || overLimit ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
+          }`}
         >
           {sending ? "Sending…" : "Send"}
         </button>
       </div>
-      <p className="text-xs text-zinc-500 mb-4">Tip: one message a day is enough. I’ll remember.</p>
+
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-xs text-zinc-500">Tip: one message a day is enough. I’ll remember.</p>
+        <span
+          className={`text-xs tabular-nums ${
+            overLimit ? "text-rose-400" : "text-zinc-500"
+          }`}
+          title={`Max ${MAX_CHARS} characters`}
+        >
+          {text.length}/{MAX_CHARS}
+        </span>
+      </div>
 
       {loading ? (
         <p className="text-zinc-500 text-sm">Loading…</p>
@@ -132,7 +166,9 @@ export default function Home() {
           {entries.map((e) => (
             <li key={e.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
               <p className="whitespace-pre-wrap">{e.content}</p>
-              <div className="mt-2 text-xs text-zinc-500">{new Date(e.created_at).toLocaleString()}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                {new Date(e.created_at).toLocaleString()}
+              </div>
             </li>
           ))}
         </ul>
@@ -147,9 +183,25 @@ export default function Home() {
               method: "POST",
               headers: access ? { "sb-access-token": access } : {},
             });
-            const j = await res.json().catch(() => ({} as Record<string, unknown>));
-            if (res.ok) alert("Weekly reflection generated. Check Reflections.");
-            else alert("Error: " + (String((j as { error?: string }).error) || res.statusText));
+
+            // API may return { ok, cached, message } or 429 for cooldown
+            const j = (await res.json().catch(() => ({}))) as {
+              cached?: boolean;
+              message?: string;
+              error?: string;
+            };
+
+            if (res.ok) {
+              if (j.cached) {
+                alert("You already have a reflection for this week. (Using the cached one.)");
+              } else {
+                alert("Weekly reflection generated. Check Reflections.");
+              }
+            } else if (res.status === 429) {
+              alert(j.message || "Please wait a day before generating another reflection.");
+            } else {
+              alert("Error: " + (j.error || res.statusText));
+            }
           }}
           className="rounded-md bg-white/10 hover:bg-white/20 px-4 py-2 text-sm"
         >
