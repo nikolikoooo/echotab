@@ -3,10 +3,14 @@ import { createClient } from "@supabase/supabase-js";
 
 // We’ll use service role on the server, but still verify the user via their access token.
 export async function POST(req: NextRequest) {
-  const { text } = await req.json().catch(() => ({}));
-  if (!text || typeof text !== "string") {
-    return NextResponse.json({ error: "no text" }, { status: 400 });
-  }
+const { text } = await req.json().catch(() => ({}));
+if (!text || typeof text !== "string") {
+  return NextResponse.json({ error: "no text" }, { status: 400 });
+}
+if (text.length > 1000) {
+  return NextResponse.json({ error: "Entry too long (max 1000 chars)" }, { status: 413 });
+}
+
 
   const accessToken = req.headers.get("sb-access-token");
   if (!accessToken) return NextResponse.json({ error: "not authenticated" }, { status: 401 });

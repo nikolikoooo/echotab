@@ -1,20 +1,3 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
-
-type MoodRollup = { avg_valence?: number; top_labels?: string[] };
-type ReflectionJSON = { summary?: string; highlights?: string[]; mood_rollup?: MoodRollup };
-
-function startOfWeekUTC(d = new Date()): Date {
-  const day = d.getUTCDay(); // 0 Sun..6 Sat
-  const diff = (day + 6) % 7; // Monday start
-  const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  start.setUTCDate(start.getUTCDate() - diff);
-  start.setUTCHours(0, 0, 0, 0);
-  return start;
-}
-
 export async function POST(req: NextRequest) {
   const accessToken = req.headers.get("sb-access-token");
   if (!accessToken) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
@@ -26,16 +9,19 @@ export async function POST(req: NextRequest) {
 
   const { data: userData, error: uErr } = await sb.auth.getUser(accessToken);
   if (uErr || !userData?.user) return NextResponse.json({ error: "auth failed" }, { status: 401 });
+  const userId = userData.user.id;
 
+  // Compute this week (Mon..Sun UTC)
   const weekStart = startOfWeekUTC();
   const fromISO = weekStart.toISOString();
   const to = new Date(weekStart); to.setUTCDate(to.getUTCDate() + 7);
   const toISO = to.toISOString();
 
+  // ❶ Load entries for this week
   const { data: entries, error: eErr } = await sb
     .from("entries")
     .select("content, created_at")
-    .eq("user_id", userData.user.id)
+    .eq("user_id", userId)
     .gte("created_at", fromISO)
     .lt("created_at", toISO)
     .order("created_at", { ascending: true });
@@ -43,12 +29,42 @@ export async function POST(req: NextRequest) {
   if (eErr) return NextResponse.json({ error: eErr.message }, { status: 500 });
   if (!entries?.length) return NextResponse.json({ ok: true, note: "no entries this week" });
 
-  const textBlock = entries.map((e) => `- (${e.created_at}) ${e.content}`).join("\n");
+  // ❷ Once-per-week: if a reflection already exists for this week, return it (no OpenAI call)
+  const { data: existingThisWeek } = await sb
+    .from("reflections")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("week_start", weekStart.toISOString().slice(0, 10))
+    .limit(1);
+
+  if (existingThisWeek && existingThisWeek.length > 0) {
+    return NextResponse.json({ ok: true, reflection: existingThisWeek[0], cached: true });
+  }
+
+  // ❸ Daily cooldown: if last reflection was <24h ago, block
+  const { data: lastReflection } = await sb
+    .from("reflections")
+    .select("created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (lastReflection?.length) {
+    const last = new Date(lastReflection[0].created_at).getTime();
+    if (Date.now() - last < 86_400_000) {
+      return NextResponse.json({ error: "cooldown", message: "Please wait a day before generating another reflection." }, { status: 429 });
+    }
+  }
+
+  // ❹ Cap input size passed to OpenAI to control token costs
+  const textBlockRaw = entries.map((e) => `- (${e.created_at}) ${e.content}`).join("\n");
+  const textBlock = textBlockRaw.slice(0, 5000); // hard cap
 
   if (!process.env.OPENAI_API_KEY) {
     return NextResponse.json({ error: "OPENAI_API_KEY missing on server" }, { status: 500 });
   }
 
+  // OpenAI call (unchanged except already-typed types/safety)
   const body = {
     model: "gpt-4o-mini",
     temperature: 0.2,
@@ -73,7 +89,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `OpenAI ${r.status}`, details: raw.slice(0, 500) }, { status: 500 });
   }
 
-  // Parse the response safely and without `any`
   let parsed: ReflectionJSON = {};
   try {
     const j: { choices?: Array<{ message?: { content?: string } }> } = JSON.parse(raw);
@@ -84,7 +99,7 @@ export async function POST(req: NextRequest) {
   }
 
   const payload = {
-    user_id: userData.user.id,
+    user_id: userId,
     week_start: weekStart.toISOString().slice(0, 10),
     summary: parsed.summary || "No summary.",
     highlights: parsed.highlights || [],
