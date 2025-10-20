@@ -81,12 +81,15 @@ export default function ReflectionsPage() {
                   day: "2-digit",
                 })}
               </div>
+
               <p className="whitespace-pre-wrap leading-relaxed">{r.content}</p>
 
               {r.entries?.length > 0 && (
                 <ul className="mt-3 pl-4 list-disc text-sm text-zinc-400">
                   {r.entries.map((e, i) => (
-                    <li key={i}>"{e}"</li>
+                    <li key={i}>
+                      &ldquo;{e}&rdquo;
+                    </li>
                   ))}
                 </ul>
               )}
@@ -101,11 +104,11 @@ export default function ReflectionsPage() {
         </div>
       )}
 
-      {/* 💡 New: Back button */}
+      {/* Back button */}
       <div className="mt-8 flex justify-center">
         <Link
           href="/"
-          className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-sm text-zinc-200 transition"
+          className="px-4 py-2 rounded-lg bg-white/10 hover:bg白/20 text-sm text-zinc-200 transition"
         >
           ← Back to Today
         </Link>
