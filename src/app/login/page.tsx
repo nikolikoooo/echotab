@@ -1,11 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
+
+  // Decide redirect at runtime via env; works in dev + prod
+  const siteUrl = useMemo(() => {
+    // Prefer env (set to http://localhost:3000 in dev, Vercel URL in prod)
+    const envUrl = process.env.NEXT_PUBLIC_SITE_URL;
+    if (envUrl && /^https?:\/\//i.test(envUrl)) return envUrl.replace(/\/+$/, "");
+    // Fallback to current origin if env missing (still works)
+    if (typeof window !== "undefined") return window.location.origin;
+    return "http://localhost:3000";
+  }, []);
+
+  const redirectTo = `${siteUrl}/auth/callback`;
 
   async function sendMagic() {
     if (!email) return;
@@ -14,8 +26,7 @@ export default function LoginPage() {
       await supabaseBrowser.auth.signInWithOtp({
         email,
         options: {
-          // Always point magic link to our server callback (works in dev + prod)
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          emailRedirectTo: redirectTo,
         },
       });
       alert("Check your email for the magic link.");
@@ -50,6 +61,11 @@ export default function LoginPage() {
           {sending ? "Sending…" : "Send magic link"}
         </button>
       </div>
+
+      {/* Debug hint for you (safe to keep or remove) */}
+      <p className="mt-3 text-xs text-zinc-500">
+        Redirect target: <span className="text-zinc-300">{redirectTo}</span>
+      </p>
     </main>
   );
 }

@@ -7,15 +7,17 @@ import { supabaseBrowser } from "@/lib/supabaseBrowser";
 type Entry = { id: string; content: string; created_at: string };
 
 const MAX_CHARS = 1000;
-const CLICK_LOCK_MS = 750; // small anti-spam delay
+const CLICK_LOCK_MS = 750;         // small anti-bounce
+const ERROR_COOLDOWN_MS = 3500;    // extra pause after 429 to avoid double errors
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [text, setText] = useState<string>("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [sending, setSending] = useState<boolean>(false);
-  const [busyWeekly, setBusyWeekly] = useState<boolean>(false);
+
+  const [sending, setSending] = useState<boolean>(false);        // send entry button lock
+  const [busyWeekly, setBusyWeekly] = useState<boolean>(false);  // weekly button lock
   const [toast, setToast] = useState<string>("");
 
   function showToast(msg: string) {
@@ -33,7 +35,7 @@ export default function Home() {
       setSession(data.session);
       await loadEntries();
 
-      // Background: try creating weekly reflection if missing (server has guards)
+      // Background: attempt weekly reflection once if missing (server has guards).
       try {
         const sess = await supabaseBrowser.auth.getSession();
         const access = sess.data.session?.access_token;
@@ -79,15 +81,18 @@ export default function Home() {
 
   async function send(): Promise<void> {
     if (sending) return;
+
     const trimmed = text.trim();
     if (!trimmed) return;
+
     if (trimmed.length > MAX_CHARS) {
       showToast(`Max ${MAX_CHARS} characters. You’re at ${trimmed.length}.`);
       return;
     }
 
     setSending(true);
-    const release = () => setTimeout(() => setSending(false), CLICK_LOCK_MS);
+    const unlockSoon = () => setTimeout(() => setSending(false), CLICK_LOCK_MS);
+    const unlockAfterError = () => setTimeout(() => setSending(false), ERROR_COOLDOWN_MS);
 
     try {
       const sess = await supabaseBrowser.auth.getSession();
@@ -99,7 +104,6 @@ export default function Home() {
         body: JSON.stringify({ text: trimmed }),
       });
 
-      // Prefer message from server if present
       const j = (await res.json().catch(() => ({}))) as {
         error?: string;
         message?: string;
@@ -109,34 +113,86 @@ export default function Home() {
         setText("");
         await loadEntries();
         showToast("Saved. See you tomorrow.");
+        unlockSoon();
         return;
       }
 
+      // Harmonized handling for 429 from either middleware or business logic
       if (res.status === 429) {
-        // Middleware might send { error: "rate_limited" } or { error: "rate_limit" }
-        const msg =
-          j.message ||
-          (j.error && /rate_limit/.test(j.error) ? "Too many requests. Please slow down." : "") ||
-          "Please slow down.";
-        showToast(msg);
+        if (j.error === "daily_limit") {
+          showToast(j.message || "You’ve already logged today. Come back tomorrow 💛");
+        } else if (j.error === "rate_limit" || j.error === "rate_limited") {
+          showToast(j.message || "Too many requests. Please slow down.");
+        } else {
+          showToast(j.message || "Please slow down.");
+        }
+        unlockAfterError();
         return;
       }
 
       if (res.status === 413) {
         showToast(`Your entry is too long. Max is ${MAX_CHARS} characters.`);
+        unlockSoon();
         return;
       }
 
-      if (j.error === "daily_limit") {
-        showToast("You’ve already logged today. Come back tomorrow 💛");
-        return;
-      }
-
-      showToast("Save failed. Please try again.");
+      // Any other error
+      showToast(j.message || "Couldn’t save right now. Please try again.");
+      unlockSoon();
     } catch {
       showToast("Network error. Please try again.");
-    } finally {
-      release(); // small unlock delay prevents double-click bursts
+      unlockSoon();
+    }
+  }
+
+  async function triggerWeekly(): Promise<void> {
+    if (busyWeekly) return;
+    setBusyWeekly(true);
+    const unlockSoon = () => setTimeout(() => setBusyWeekly(false), CLICK_LOCK_MS);
+    const unlockAfterError = () => setTimeout(() => setBusyWeekly(false), ERROR_COOLDOWN_MS);
+
+    try {
+      const sess = await supabaseBrowser.auth.getSession();
+      const access = sess.data.session?.access_token;
+
+      const res = await fetch("/api/weekly", {
+        method: "POST",
+        headers: access ? { "sb-access-token": access } : {},
+      });
+
+      const j = (await res.json().catch(() => ({}))) as {
+        cached?: boolean;
+        message?: string;
+        error?: string;
+      };
+
+      if (res.ok) {
+        if (j.cached) {
+          showToast("Reflection already exists — using the cached one.");
+        } else {
+          showToast("Weekly reflection generated. Check Reflections.");
+        }
+        unlockSoon();
+        return;
+      }
+
+      if (res.status === 429) {
+        if (j.error === "cooldown") {
+          showToast(j.message || "Please wait a day before generating another reflection.");
+        } else if (j.error === "rate_limit" || j.error === "rate_limited") {
+          showToast(j.message || "Too many requests. Please slow down.");
+        } else {
+          showToast(j.message || "Please slow down.");
+        }
+        unlockAfterError();
+        return;
+      }
+
+      showToast("Error generating reflection. Please try again.");
+      unlockSoon();
+    } catch {
+      showToast("Network error. Please try again.");
+      unlockSoon();
     }
   }
 
@@ -146,7 +202,6 @@ export default function Home() {
   }
 
   if (!session) return null;
-
   const overLimit = text.length > MAX_CHARS;
 
   return (
@@ -185,7 +240,7 @@ export default function Home() {
             sending || overLimit ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
           }`}
         >
-          {sending ? "Sending…" : "Send"}
+          {sending ? "Working…" : "Send"}
         </button>
       </div>
 
@@ -204,10 +259,7 @@ export default function Home() {
       ) : (
         <ul className="space-y-3">
           {entries.map((e) => (
-            <li
-              key={e.id}
-              className="rounded-lg border border-zinc-800 bg-zinc-900 p-3"
-            >
+            <li key={e.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
               <p className="whitespace-pre-wrap">{e.content}</p>
               <div className="mt-2 text-xs text-zinc-500">
                 {new Date(e.created_at).toLocaleString()}
@@ -219,46 +271,7 @@ export default function Home() {
 
       <div className="mt-8">
         <button
-          onClick={async () => {
-            if (busyWeekly) return;
-            setBusyWeekly(true);
-            const release = () => setTimeout(() => setBusyWeekly(false), CLICK_LOCK_MS);
-
-            try {
-              const sess = await supabaseBrowser.auth.getSession();
-              const access = sess.data.session?.access_token;
-              const res = await fetch("/api/weekly", {
-                method: "POST",
-                headers: access ? { "sb-access-token": access } : {},
-              });
-
-              const j = (await res.json().catch(() => ({}))) as {
-                cached?: boolean;
-                message?: string;
-                error?: string;
-              };
-
-              if (res.ok) {
-                if (j.cached) {
-                  showToast("Reflection already exists — using the cached one.");
-                } else {
-                  showToast("Weekly reflection generated. Check Reflections.");
-                }
-              } else if (res.status === 429) {
-                const msg =
-                  j.message ||
-                  (j.error && /rate_limit/.test(j.error) ? "Too many requests. Please slow down." : "") ||
-                  "Please wait before trying again.";
-                showToast(msg);
-              } else {
-                showToast("Error generating reflection. Please try again.");
-              }
-            } catch {
-              showToast("Network error. Please try again.");
-            } finally {
-              release();
-            }
-          }}
+          onClick={() => void triggerWeekly()}
           disabled={busyWeekly}
           className={`rounded-md px-4 py-2 text-sm ${
             busyWeekly ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"

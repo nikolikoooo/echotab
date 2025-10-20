@@ -1,31 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 
 /**
- * Lightweight in-memory rate limiter for /api routes.
- * - /api/weekly : 2 req/min per IP
- * - /api/echo   : 6 req/min per IP
- * - others      : 60 req/min per IP
+ * Simple in-memory rate limiter middleware.
+ * - /api/weekly → 2 req/min per IP
+ * - /api/echo   → 6 req/min per IP
+ * - everything else under /api/ → 60 req/min per IP
  */
 
-type Bucket = number[]; // timestamps (ms)
+type Bucket = number[];
 const buckets = new Map<string, Bucket>();
 
 const DEFAULT_WINDOW_MS = 60_000;
-const LIMITS: Array<{ test: (p: string) => boolean; max: number; windowMs: number }> = [
-  { test: (p) => p.startsWith("/api/weekly"), max: 2, windowMs: DEFAULT_WINDOW_MS },
-  { test: (p) => p.startsWith("/api/echo"),   max: 6, windowMs: DEFAULT_WINDOW_MS },
-  { test: () => true,                          max: 60, windowMs: DEFAULT_WINDOW_MS },
+
+const LIMITS = [
+  { test: (p: string) => p.startsWith("/api/weekly"), max: 2, windowMs: DEFAULT_WINDOW_MS },
+  { test: (p: string) => p.startsWith("/api/echo"), max: 6, windowMs: DEFAULT_WINDOW_MS },
+  { test: () => true, max: 60, windowMs: DEFAULT_WINDOW_MS },
 ];
 
 function getClientIp(req: NextRequest): string {
   const xf = req.headers.get("x-forwarded-for");
   if (xf) return xf.split(",")[0].trim();
-  // @ts-expect-error not always typed
+  // @ts-expect-error ip not always defined in NextRequest
   return String(req.ip ?? "unknown");
 }
 
 function getLimit(pathname: string) {
-  for (const r of LIMITS) if (r.test(pathname)) return r;
+  for (const l of LIMITS) if (l.test(pathname)) return l;
   return { max: 60, windowMs: DEFAULT_WINDOW_MS };
 }
 
@@ -47,12 +48,10 @@ export function middleware(req: NextRequest) {
 
   const ip = getClientIp(req);
   const { max, windowMs } = getLimit(pathname);
-
   const group =
     pathname.startsWith("/api/weekly") ? "/api/weekly" :
-    pathname.startsWith("/api/echo")   ? "/api/echo"   :
+    pathname.startsWith("/api/echo") ? "/api/echo" :
     "/api/*";
-
   const key = `${ip}::${group}`;
   const { limited, remaining } = hit(key, windowMs, max);
 
@@ -73,4 +72,6 @@ export function middleware(req: NextRequest) {
   return res;
 }
 
-export const config = { matcher: ["/api/:path*"] };
+export const config = {
+  matcher: ["/api/:path*"],
+};
