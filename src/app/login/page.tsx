@@ -11,14 +11,14 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
 
-  // Build redirect target for magic link
+  // Build redirect target for magic link — now ALWAYS /login
   const siteUrl = useMemo(() => {
     const envUrl = process.env.NEXT_PUBLIC_SITE_URL;
     if (envUrl && /^https?:\/\//i.test(envUrl)) return envUrl.replace(/\/+$/, "");
     if (typeof window !== "undefined") return window.location.origin;
     return "http://localhost:3000";
   }, []);
-  const redirectTo = `${siteUrl}/auth/callback`;
+  const redirectTo = `${siteUrl}/login`;
 
   // If we already have a session, go home immediately
   useEffect(() => {
