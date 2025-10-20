@@ -20,7 +20,7 @@ export default function LoginPage() {
   }, []);
   const redirectTo = `${siteUrl}/auth/callback`;
 
-  // If we already have a session, go home immediately (ignore ?error=auth)
+  // If we already have a session, go home immediately
   useEffect(() => {
     (async () => {
       const { data } = await supabaseBrowser.auth.getSession();
@@ -138,9 +138,10 @@ export default function LoginPage() {
         </button>
       </div>
 
-      <p className="mt-3 text-xs text-zinc-500">
-        Redirect target: <span className="text-zinc-300">{redirectTo}</span>
-      </p>
+      {/* No redirect target shown in UI */}
+      <span className="sr-only" aria-hidden>
+        {/* redirect: {redirectTo} */}
+      </span>
     </main>
   );
 }
