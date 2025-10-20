@@ -16,6 +16,7 @@ export default function ReflectionsPage() {
   const [session, setSession] = useState<{ access_token: string } | null>(null);
   const [reflections, setReflections] = useState<Reflection[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -30,12 +31,27 @@ export default function ReflectionsPage() {
   }, []);
 
   async function loadReflections(token: string) {
-    const res = await fetch("/api/reflections", {
-      headers: { "sb-access-token": token },
-    });
-    const j = await res.json();
-    if (res.ok) setReflections(j);
-    setLoading(false);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/reflections", {
+        headers: { "sb-access-token": token },
+      });
+      let j: unknown = null;
+      try {
+        j = await res.json();
+      } catch {
+        // non-JSON (e.g. 404) — treat as error
+      }
+      if (!res.ok || !Array.isArray(j)) {
+        setErrorMsg("Couldn’t load your reflections. Please try again.");
+        return;
+      }
+      setReflections(j as Reflection[]);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (!session) return null;
@@ -64,6 +80,8 @@ export default function ReflectionsPage() {
 
       {loading ? (
         <p className="text-zinc-500">Loading...</p>
+      ) : errorMsg ? (
+        <p className="text-red-400 text-sm">{errorMsg}</p>
       ) : reflections.length === 0 ? (
         <p className="text-zinc-500 text-sm">No reflections yet.</p>
       ) : (
@@ -108,7 +126,7 @@ export default function ReflectionsPage() {
       <div className="mt-8 flex justify-center">
         <Link
           href="/"
-          className="px-4 py-2 rounded-lg bg-white/10 hover:bg白/20 text-sm text-zinc-200 transition"
+          className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-sm text-zinc-200 transition"
         >
           ← Back to Today
         </Link>
