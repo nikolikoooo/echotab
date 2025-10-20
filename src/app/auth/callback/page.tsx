@@ -12,6 +12,13 @@ export default function AuthCallbackPage() {
   useEffect(() => {
     (async () => {
       try {
+        // If we already have a session for any reason, just go home.
+        const s0 = await supabaseBrowser.auth.getSession();
+        if (s0.data.session) {
+          router.replace("/");
+          return;
+        }
+
         const url = new URL(window.location.href);
 
         // 1) HASH TOKENS
@@ -62,9 +69,16 @@ export default function AuthCallbackPage() {
           }
         }
 
+        // If we get here and now have a session (race conditions), go home
+        const s1 = await supabaseBrowser.auth.getSession();
+        if (s1.data.session) {
+          router.replace("/");
+          return;
+        }
+
+        // Last resort: go to login (but only if still not signed in)
         router.replace("/login?error=auth");
       } catch (e) {
-        console.error("Auth callback failure:", e);
         router.replace("/login?error=auth");
       }
     })();

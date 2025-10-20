@@ -1,33 +1,112 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
+const EMAIL_KEY = "echotab-email";
+
 export default function LoginPage() {
+  const router = useRouter();
+  const qp = useSearchParams();
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
 
-  // Decide redirect at runtime via env; works in dev + prod
+  // Build redirect target for magic link
   const siteUrl = useMemo(() => {
-    // Prefer env (set to http://localhost:3000 in dev, Vercel URL in prod)
     const envUrl = process.env.NEXT_PUBLIC_SITE_URL;
     if (envUrl && /^https?:\/\//i.test(envUrl)) return envUrl.replace(/\/+$/, "");
-    // Fallback to current origin if env missing (still works)
     if (typeof window !== "undefined") return window.location.origin;
     return "http://localhost:3000";
   }, []);
-
   const redirectTo = `${siteUrl}/auth/callback`;
+
+  // 0) If we already have a session, go home immediately (ignore ?error=auth)
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabaseBrowser.auth.getSession();
+      if (data.session) {
+        router.replace("/");
+      }
+    })();
+  }, [router]);
+
+  // 1) Handle tokens if Supabase sends the link back to /login
+  useEffect(() => {
+    (async () => {
+      try {
+        const url = new URL(window.location.href);
+
+        // A) HASH TOKENS (#access_token=...&refresh_token=...)
+        if (url.hash.includes("access_token")) {
+          const frag = new URLSearchParams(url.hash.slice(1));
+          const access_token = frag.get("access_token") || "";
+          const refresh_token = frag.get("refresh_token") || "";
+          if (access_token && refresh_token) {
+            const { error } = await supabaseBrowser.auth.setSession({ access_token, refresh_token });
+            if (!error) {
+              router.replace("/");
+              return;
+            }
+          }
+        }
+
+        // B) MAGICLINK (?token_hash=...&type=magiclink)
+        const token_hash = url.searchParams.get("token_hash");
+        const linkType = url.searchParams.get("type");
+        if (token_hash && linkType === "magiclink") {
+          let storedEmail = localStorage.getItem(EMAIL_KEY) || "";
+          if (!storedEmail) {
+            const urlEmail = url.searchParams.get("email") || "";
+            if (urlEmail) {
+              localStorage.setItem(EMAIL_KEY, urlEmail);
+              storedEmail = urlEmail;
+            }
+          }
+
+          const { error } = await supabaseBrowser.auth.verifyOtp({
+            type: "magiclink",
+            token_hash,
+            email: storedEmail,
+          });
+          if (!error) {
+            router.replace("/");
+            return;
+          }
+        }
+
+        // C) PKCE (?code=...) — try exchange; if it fails but a session exists, still go home
+        const code = url.searchParams.get("code");
+        if (code) {
+          const { error } = await supabaseBrowser.auth.exchangeCodeForSession(url.toString());
+          if (!error) {
+            router.replace("/");
+            return;
+          }
+        }
+
+        // D) If Supabase appended ?error=auth but we already have a session, ignore it
+        if (qp.get("error")) {
+          const { data } = await supabaseBrowser.auth.getSession();
+          if (data.session) {
+            router.replace("/");
+            return;
+          }
+        }
+      } catch {
+        /* ignore — user can still request a new link */
+      }
+    })();
+  }, [router, qp]);
 
   async function sendMagic() {
     if (!email) return;
     setSending(true);
     try {
+      localStorage.setItem(EMAIL_KEY, email);
       await supabaseBrowser.auth.signInWithOtp({
         email,
-        options: {
-          emailRedirectTo: redirectTo,
-        },
+        options: { emailRedirectTo: redirectTo },
       });
       alert("Check your email for the magic link.");
     } catch {
@@ -62,7 +141,6 @@ export default function LoginPage() {
         </button>
       </div>
 
-      {/* Debug hint for you (safe to keep or remove) */}
       <p className="mt-3 text-xs text-zinc-500">
         Redirect target: <span className="text-zinc-300">{redirectTo}</span>
       </p>

@@ -7,18 +7,17 @@ import { supabaseBrowser } from "@/lib/supabaseBrowser";
 type Entry = { id: string; content: string; created_at: string };
 
 const MAX_CHARS = 1000;
-const CLICK_LOCK_MS = 750;         // small anti-bounce
-const ERROR_COOLDOWN_MS = 3500;    // extra pause after 429 to avoid double errors
+const CLICK_LOCK_MS = 750;
+const ERROR_COOLDOWN_MS = 3500;
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
-  const [text, setText] = useState<string>("");
+  const [text, setText] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-
-  const [sending, setSending] = useState<boolean>(false);        // send entry button lock
-  const [busyWeekly, setBusyWeekly] = useState<boolean>(false);  // weekly button lock
-  const [toast, setToast] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [busyWeekly, setBusyWeekly] = useState(false);
+  const [toast, setToast] = useState("");
 
   function showToast(msg: string) {
     setToast(msg);
@@ -26,6 +25,8 @@ export default function Home() {
   }
 
   useEffect(() => {
+    let unsub: (() => void) | undefined;
+
     (async () => {
       const { data } = await supabaseBrowser.auth.getSession();
       if (!data.session) {
@@ -33,42 +34,21 @@ export default function Home() {
         return;
       }
       setSession(data.session);
+
+      const sub = supabaseBrowser.auth.onAuthStateChange((_e, s) => {
+        setSession(s ?? null);
+      });
+      unsub = () => sub.data.subscription.unsubscribe();
+
       await loadEntries();
-
-      // Background: attempt weekly reflection once if missing (server has guards).
-      try {
-        const sess = await supabaseBrowser.auth.getSession();
-        const access = sess.data.session?.access_token;
-
-        function getMondayOfThisWeek(): string {
-          const now = new Date();
-          const day = now.getDay();
-          const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-          const monday = new Date(now.setDate(diff));
-          monday.setHours(0, 0, 0, 0);
-          return monday.toISOString().slice(0, 10);
-        }
-
-        const weekStart = getMondayOfThisWeek();
-        const { data: existing } = await supabaseBrowser
-          .from("reflections")
-          .select("week_start")
-          .eq("week_start", weekStart)
-          .limit(1);
-
-        if (!existing || existing.length === 0) {
-          await fetch("/api/weekly", {
-            method: "POST",
-            headers: access ? { "sb-access-token": access } : {},
-          });
-        }
-      } catch {
-        /* ignore */
-      }
     })();
+
+    return () => {
+      if (unsub) unsub();
+    };
   }, []);
 
-  async function loadEntries(): Promise<void> {
+  async function loadEntries() {
     const { data, error } = await supabaseBrowser
       .from("entries")
       .select("id, content, created_at")
@@ -79,12 +59,21 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function send(): Promise<void> {
+  async function getAuthHeaders(): Promise<HeadersInit | null> {
+    const { data } = await supabaseBrowser.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) return null;
+    return {
+      "sb-access-token": token,
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
+  async function send() {
     if (sending) return;
 
     const trimmed = text.trim();
     if (!trimmed) return;
-
     if (trimmed.length > MAX_CHARS) {
       showToast(`Max ${MAX_CHARS} characters. You’re at ${trimmed.length}.`);
       return;
@@ -95,19 +84,20 @@ export default function Home() {
     const unlockAfterError = () => setTimeout(() => setSending(false), ERROR_COOLDOWN_MS);
 
     try {
-      const sess = await supabaseBrowser.auth.getSession();
-      const access = sess.data.session?.access_token;
+      const headers = await getAuthHeaders();
+      if (!headers) {
+        showToast("Please sign in again.");
+        unlockSoon();
+        return;
+      }
 
       const res = await fetch("/api/echo", {
         method: "POST",
-        headers: access ? { "sb-access-token": access } : {},
+        headers,
         body: JSON.stringify({ text: trimmed }),
       });
 
-      const j = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        message?: string;
-      };
+      const j = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
 
       if (res.ok) {
         setText("");
@@ -117,14 +107,17 @@ export default function Home() {
         return;
       }
 
-      // Harmonized handling for 429 from either middleware or business logic
+      if (res.status === 401) {
+        showToast("Please sign in again.");
+        unlockSoon();
+        return;
+      }
+
       if (res.status === 429) {
         if (j.error === "daily_limit") {
           showToast(j.message || "You’ve already logged today. Come back tomorrow 💛");
-        } else if (j.error === "rate_limit" || j.error === "rate_limited") {
-          showToast(j.message || "Too many requests. Please slow down.");
         } else {
-          showToast(j.message || "Please slow down.");
+          showToast(j.message || "Too many requests. Please slow down.");
         }
         unlockAfterError();
         return;
@@ -136,7 +129,6 @@ export default function Home() {
         return;
       }
 
-      // Any other error
       showToast(j.message || "Couldn’t save right now. Please try again.");
       unlockSoon();
     } catch {
@@ -145,21 +137,22 @@ export default function Home() {
     }
   }
 
-  async function triggerWeekly(): Promise<void> {
+  async function triggerWeekly() {
     if (busyWeekly) return;
+
     setBusyWeekly(true);
     const unlockSoon = () => setTimeout(() => setBusyWeekly(false), CLICK_LOCK_MS);
     const unlockAfterError = () => setTimeout(() => setBusyWeekly(false), ERROR_COOLDOWN_MS);
 
     try {
-      const sess = await supabaseBrowser.auth.getSession();
-      const access = sess.data.session?.access_token;
+      const headers = await getAuthHeaders();
+      if (!headers) {
+        showToast("Please sign in again.");
+        unlockSoon();
+        return;
+      }
 
-      const res = await fetch("/api/weekly", {
-        method: "POST",
-        headers: access ? { "sb-access-token": access } : {},
-      });
-
+      const res = await fetch("/api/weekly", { method: "POST", headers });
       const j = (await res.json().catch(() => ({}))) as {
         cached?: boolean;
         message?: string;
@@ -167,28 +160,28 @@ export default function Home() {
       };
 
       if (res.ok) {
-        if (j.cached) {
-          showToast("Reflection already exists — using the cached one.");
-        } else {
-          showToast("Weekly reflection generated. Check Reflections.");
-        }
+        showToast(
+          j.cached
+            ? "Reflection already exists — using the cached one."
+            : "Weekly reflection generated. Check Reflections."
+        );
+        unlockSoon();
+        return;
+      }
+
+      if (res.status === 401) {
+        showToast("Please sign in again.");
         unlockSoon();
         return;
       }
 
       if (res.status === 429) {
-        if (j.error === "cooldown") {
-          showToast(j.message || "Please wait a day before generating another reflection.");
-        } else if (j.error === "rate_limit" || j.error === "rate_limited") {
-          showToast(j.message || "Too many requests. Please slow down.");
-        } else {
-          showToast(j.message || "Please slow down.");
-        }
+        showToast(j.message || "Please slow down.");
         unlockAfterError();
         return;
       }
 
-      showToast("Error generating reflection. Please try again.");
+      showToast(j.message || "Error generating reflection. Please try again.");
       unlockSoon();
     } catch {
       showToast("Network error. Please try again.");
@@ -206,7 +199,6 @@ export default function Home() {
 
   return (
     <main>
-      {/* toast */}
       {toast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 rounded-lg bg-white/10 border border-white/10 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
           {toast}
@@ -229,9 +221,7 @@ export default function Home() {
             overLimit ? "border-rose-500" : "border-zinc-800"
           }`}
           maxLength={MAX_CHARS}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void send();
-          }}
+          onKeyDown={(e) => e.key === "Enter" && void send()}
         />
         <button
           onClick={() => void send()}
