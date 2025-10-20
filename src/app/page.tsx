@@ -1,54 +1,42 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
+import Link from "next/link";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 type Entry = { id: string; content: string; created_at: string };
+type SessionShape = { access_token: string };
 
-const MAX_CHARS = 1000;
-const CLICK_LOCK_MS = 750;
-const ERROR_COOLDOWN_MS = 3500;
+/** Type guards for safe JSON handling */
+function hasMessage(o: unknown): o is { message: string } {
+  return typeof o === "object" && o !== null && "message" in o && typeof (o as { message: unknown }).message === "string";
+}
+function hasError(o: unknown): o is { error: string } {
+  return typeof o === "object" && o !== null && "error" in o && typeof (o as { error: unknown }).error === "string";
+}
 
 export default function Home() {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<SessionShape | null>(null);
   const [text, setText] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [busyWeekly, setBusyWeekly] = useState(false);
-  const [toast, setToast] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function showToast(msg: string) {
-    setToast(msg);
-    setTimeout(() => setToast(""), 4000);
-  }
-
+  // --- bootstrap session + load entries ---
   useEffect(() => {
-    let unsub: (() => void) | undefined;
-
     (async () => {
       const { data } = await supabaseBrowser.auth.getSession();
       if (!data.session) {
         window.location.href = "/login";
         return;
       }
-      setSession(data.session);
-
-      const sub = supabaseBrowser.auth.onAuthStateChange((_e, s) => {
-        setSession(s ?? null);
-      });
-      unsub = () => sub.data.subscription.unsubscribe();
-
+      setSession({ access_token: data.session.access_token });
       await loadEntries();
     })();
-
-    return () => {
-      if (unsub) unsub();
-    };
   }, []);
 
   async function loadEntries() {
+    setLoading(true);
     const { data, error } = await supabaseBrowser
       .from("entries")
       .select("id, content, created_at")
@@ -59,133 +47,71 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function getAuthHeaders(): Promise<HeadersInit | null> {
-    const { data } = await supabaseBrowser.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return null;
-    return {
-      "sb-access-token": token,
-      Authorization: `Bearer ${token}`,
-    };
-  }
-
+  // --- add a daily entry ---
   async function send() {
-    if (sending) return;
-
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    if (trimmed.length > MAX_CHARS) {
-      showToast(`Max ${MAX_CHARS} characters. You’re at ${trimmed.length}.`);
-      return;
-    }
-
-    setSending(true);
-    const unlockSoon = () => setTimeout(() => setSending(false), CLICK_LOCK_MS);
-    const unlockAfterError = () => setTimeout(() => setSending(false), ERROR_COOLDOWN_MS);
-
+    if (!text.trim() || !session) return;
+    setBusy(true);
     try {
-      const headers = await getAuthHeaders();
-      if (!headers) {
-        showToast("Please sign in again.");
-        unlockSoon();
-        return;
-      }
-
       const res = await fetch("/api/echo", {
         method: "POST",
-        headers,
-        body: JSON.stringify({ text: trimmed }),
+        headers: { "sb-access-token": session.access_token },
+        body: JSON.stringify({ text }),
       });
 
-      const j = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      let j: unknown = {};
+      try {
+        j = await res.json();
+      } catch {
+        /* ignore */
+      }
+
+      if (hasMessage(j)) {
+        alert(j.message);
+      } else if (res.ok) {
+        alert("Saved.");
+      } else {
+        alert("Save failed: " + (hasError(j) ? j.error : res.statusText));
+      }
 
       if (res.ok) {
         setText("");
         await loadEntries();
-        showToast("Saved. See you tomorrow.");
-        unlockSoon();
-        return;
       }
-
-      if (res.status === 401) {
-        showToast("Please sign in again.");
-        unlockSoon();
-        return;
-      }
-
-      if (res.status === 429) {
-        if (j.error === "daily_limit") {
-          showToast(j.message || "You’ve already logged today. Come back tomorrow 💛");
-        } else {
-          showToast(j.message || "Too many requests. Please slow down.");
-        }
-        unlockAfterError();
-        return;
-      }
-
-      if (res.status === 413) {
-        showToast(`Your entry is too long. Max is ${MAX_CHARS} characters.`);
-        unlockSoon();
-        return;
-      }
-
-      showToast(j.message || "Couldn’t save right now. Please try again.");
-      unlockSoon();
-    } catch {
-      showToast("Network error. Please try again.");
-      unlockSoon();
+    } catch (e) {
+      alert("Save failed: " + (e instanceof Error ? e.message : "Unknown error"));
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function triggerWeekly() {
-    if (busyWeekly) return;
-
-    setBusyWeekly(true);
-    const unlockSoon = () => setTimeout(() => setBusyWeekly(false), CLICK_LOCK_MS);
-    const unlockAfterError = () => setTimeout(() => setBusyWeekly(false), ERROR_COOLDOWN_MS);
-
+  // --- generate weekly reflection (POST /api/weekly) ---
+  async function generateWeekly() {
+    if (!session) return;
+    setBusy(true);
     try {
-      const headers = await getAuthHeaders();
-      if (!headers) {
-        showToast("Please sign in again.");
-        unlockSoon();
-        return;
+      const res = await fetch("/api/weekly", {
+        method: "POST",
+        headers: { "sb-access-token": session.access_token },
+      });
+
+      let j: unknown = {};
+      try {
+        j = await res.json();
+      } catch {
+        /* ignore */
       }
 
-      const res = await fetch("/api/weekly", { method: "POST", headers });
-      const j = (await res.json().catch(() => ({}))) as {
-        cached?: boolean;
-        message?: string;
-        error?: string;
-      };
-
-      if (res.ok) {
-        showToast(
-          j.cached
-            ? "Reflection already exists — using the cached one."
-            : "Weekly reflection generated. Check Reflections."
-        );
-        unlockSoon();
-        return;
+      if (hasMessage(j)) {
+        alert(j.message);
+      } else if (res.ok) {
+        alert("Weekly reflection generated. Check Reflections.");
+      } else {
+        alert("Error generating reflection: " + (hasError(j) ? j.error : res.statusText));
       }
-
-      if (res.status === 401) {
-        showToast("Please sign in again.");
-        unlockSoon();
-        return;
-      }
-
-      if (res.status === 429) {
-        showToast(j.message || "Please slow down.");
-        unlockAfterError();
-        return;
-      }
-
-      showToast(j.message || "Error generating reflection. Please try again.");
-      unlockSoon();
-    } catch {
-      showToast("Network error. Please try again.");
-      unlockSoon();
+    } catch (e) {
+      alert("Error generating reflection: " + (e instanceof Error ? e.message : "Unknown error"));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -195,55 +121,52 @@ export default function Home() {
   }
 
   if (!session) return null;
-  const overLimit = text.length > MAX_CHARS;
+
+  const remaining = 1000 - text.length;
+  const over = remaining < 0;
 
   return (
-    <main>
-      {toast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 rounded-lg bg-white/10 border border-white/10 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          {toast}
-        </div>
-      )}
-
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">EchoTab</h1>
+    <main className="max-w-3xl mx-auto p-4 md:p-8">
+      <header className="flex items-center justify-between mb-4">
+        <nav className="flex items-center gap-3 text-sm">
+          <Link href="/" className="text-zinc-100 font-medium">EchoTab</Link>
+          <Link href="/" className="text-zinc-400 hover:text-zinc-200">Today</Link>
+          <Link href="/reflections" className="text-zinc-400 hover:text-zinc-200">Reflections</Link>
+        </nav>
         <button onClick={signOut} className="text-xs text-zinc-400 hover:text-zinc-200">
           Sign out
         </button>
-      </div>
+      </header>
 
+      {/* input row */}
       <div className="flex gap-2 mb-2">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="One honest sentence about today…"
-          className={`flex-1 rounded-md bg-zinc-900 border p-3 ${
-            overLimit ? "border-rose-500" : "border-zinc-800"
-          }`}
-          maxLength={MAX_CHARS}
-          onKeyDown={(e) => e.key === "Enter" && void send()}
+          className="flex-1 rounded-md bg-zinc-900 border border-zinc-800 p-3"
+          maxLength={1000}
+          onKeyDown={(e) => e.key === "Enter" && !busy && !over && send()}
         />
         <button
-          onClick={() => void send()}
-          disabled={sending || overLimit}
+          onClick={send}
+          disabled={busy || !text.trim() || over}
           className={`rounded-md px-4 ${
-            sending || overLimit ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
+            busy || !text.trim() || over ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
           }`}
         >
-          {sending ? "Working…" : "Send"}
+          {busy ? "Sending…" : "Send"}
         </button>
       </div>
 
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-zinc-500">Tip: one message a day is enough. I’ll remember.</p>
-        <span
-          className={`text-xs tabular-nums ${overLimit ? "text-rose-400" : "text-zinc-500"}`}
-          title={`Max ${MAX_CHARS} characters`}
-        >
-          {text.length}/{MAX_CHARS}
+        <span className={`text-xs ${over ? "text-red-400" : "text-zinc-500"}`}>
+          {Math.max(0, remaining)}/1000
         </span>
       </div>
 
+      {/* entries list */}
       {loading ? (
         <p className="text-zinc-500 text-sm">Loading…</p>
       ) : (
@@ -259,15 +182,15 @@ export default function Home() {
         </ul>
       )}
 
-      <div className="mt-8">
+      <div className="mt-6">
         <button
-          onClick={() => void triggerWeekly()}
-          disabled={busyWeekly}
-          className={`rounded-md px-4 py-2 text-sm ${
-            busyWeekly ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
+          onClick={generateWeekly}
+          disabled={busy}
+          className={`rounded-md px-4 py-2 ${
+            busy ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
           }`}
         >
-          {busyWeekly ? "Working…" : "Generate Weekly Reflection"}
+          {busy ? "Working…" : "Generate Weekly Reflection"}
         </button>
       </div>
     </main>
