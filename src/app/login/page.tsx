@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 const EMAIL_KEY = "echotab-email";
 
 export default function LoginPage() {
   const router = useRouter();
-  const qp = useSearchParams();
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
 
@@ -21,17 +20,15 @@ export default function LoginPage() {
   }, []);
   const redirectTo = `${siteUrl}/auth/callback`;
 
-  // 0) If we already have a session, go home immediately (ignore ?error=auth)
+  // If we already have a session, go home immediately (ignore ?error=auth)
   useEffect(() => {
     (async () => {
       const { data } = await supabaseBrowser.auth.getSession();
-      if (data.session) {
-        router.replace("/");
-      }
+      if (data.session) router.replace("/");
     })();
   }, [router]);
 
-  // 1) Handle tokens if Supabase sends the link back to /login
+  // Handle tokens if Supabase sends the link back to /login
   useEffect(() => {
     (async () => {
       try {
@@ -85,8 +82,8 @@ export default function LoginPage() {
           }
         }
 
-        // D) If Supabase appended ?error=auth but we already have a session, ignore it
-        if (qp.get("error")) {
+        // D) If ?error is present but we already have a session, ignore it
+        if (url.searchParams.get("error")) {
           const { data } = await supabaseBrowser.auth.getSession();
           if (data.session) {
             router.replace("/");
@@ -97,7 +94,7 @@ export default function LoginPage() {
         /* ignore — user can still request a new link */
       }
     })();
-  }, [router, qp]);
+  }, [router]);
 
   async function sendMagic() {
     if (!email) return;
