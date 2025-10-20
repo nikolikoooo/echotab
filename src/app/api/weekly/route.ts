@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
@@ -15,38 +17,49 @@ function startOfWeekUTC(d = new Date()): Date {
   return start;
 }
 
-function getAccessToken(req: NextRequest): string | null {
-  const h1 = req.headers.get("sb-access-token");
-  if (h1) return h1;
-  const auth = req.headers.get("authorization");
-  if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
-  const cookieToken = req.cookies.get("sb-access-token")?.value;
-  if (cookieToken) return cookieToken;
-  return null;
-}
-
 export async function POST(req: NextRequest) {
-  const accessToken = getAccessToken(req);
-  if (!accessToken) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
+  // Auth via cookies
+  const cookieStore = cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name, value, options) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name, options) {
+          cookieStore.set({ name, value: "", ...options, maxAge: 0 });
+        },
+      },
+    }
+  );
 
-  const sb = createClient(
+  const { data: authData, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !authData?.user) {
+    return NextResponse.json({ error: "auth failed" }, { status: 401 });
+  }
+  const userId = authData.user.id;
+
+  // Admin client for reads/writes
+  const sbAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE!
   );
-
-  const { data: userData, error: uErr } = await sb.auth.getUser(accessToken);
-  if (uErr || !userData?.user) return NextResponse.json({ error: "auth failed" }, { status: 401 });
-  const userId = userData.user.id;
 
   // Week window (Mon..Sun UTC)
   const weekStart = startOfWeekUTC();
   const weekKey = weekStart.toISOString().slice(0, 10);
   const fromISO = weekStart.toISOString();
-  const to = new Date(weekStart); to.setUTCDate(to.getUTCDate() + 7);
+  const to = new Date(weekStart);
+  to.setUTCDate(to.getUTCDate() + 7);
   const toISO = to.toISOString();
 
-  // 1) Load entries for this week
-  const { data: entries, error: eErr } = await sb
+  // 1) Load entries
+  const { data: entries, error: eErr } = await sbAdmin
     .from("entries")
     .select("content, created_at")
     .eq("user_id", userId)
@@ -58,7 +71,7 @@ export async function POST(req: NextRequest) {
   if (!entries?.length) return NextResponse.json({ ok: true, note: "no entries this week" });
 
   // 2) Once-per-week: return existing reflection if present
-  const { data: existingThisWeek } = await sb
+  const { data: existingThisWeek } = await sbAdmin
     .from("reflections")
     .select("*")
     .eq("user_id", userId)
@@ -70,7 +83,7 @@ export async function POST(req: NextRequest) {
   }
 
   // 3) Daily cooldown: 24h since last reflection
-  const { data: lastReflection } = await sb
+  const { data: lastReflection } = await sbAdmin
     .from("reflections")
     .select("created_at")
     .eq("user_id", userId)
@@ -87,7 +100,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 4) Cap input size to control token costs
+  // 4) Cap input size for token safety
   const textBlockRaw = entries.map((e) => `- (${e.created_at}) ${e.content}`).join("\n");
   const textBlock = textBlockRaw.slice(0, 5000);
 
@@ -99,10 +112,14 @@ export async function POST(req: NextRequest) {
     model: "gpt-4o-mini",
     temperature: 0.2,
     messages: [
-      { role: "system", content: "Summarize the user's week empathetically. Output JSON with: summary (120-200 words), highlights (array of 3 short quotes), mood_rollup (object with avg_valence -1..1 and top_labels array of 3)." },
-      { role: "user", content: `Entries this week:\n${textBlock}` }
+      {
+        role: "system",
+        content:
+          "Summarize the user's week empathetically. Output JSON with: summary (120-200 words), highlights (array of 3 short quotes), mood_rollup (object with avg_valence -1..1 and top_labels array of 3).",
+      },
+      { role: "user", content: `Entries this week:\n${textBlock}` },
     ],
-    response_format: { type: "json_object" as const }
+    response_format: { type: "json_object" as const },
   };
 
   const r = await fetch(OPENAI_ENDPOINT, {
@@ -136,7 +153,7 @@ export async function POST(req: NextRequest) {
     mood_rollup: parsed.mood_rollup || null,
   };
 
-  const { error: upErr } = await sb
+  const { error: upErr } = await sbAdmin
     .from("reflections")
     .upsert(payload, { onConflict: "user_id,week_start" });
   if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });

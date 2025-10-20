@@ -1,49 +1,55 @@
 "use client";
+
+import { useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
-import { useEffect, useState } from "react";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
-
-  useEffect(() => {
-    // if already signed in, bounce to home
-    supabaseBrowser.auth.getSession().then(({ data }) => {
-      if (data.session) window.location.href = "/";
-    });
-  }, []);
+  const [sending, setSending] = useState(false);
 
   async function sendMagic() {
     if (!email) return;
-    await supabaseBrowser.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin },
-    });
-    setSent(true);
+    setSending(true);
+    try {
+      await supabaseBrowser.auth.signInWithOtp({
+        email,
+        options: {
+          // Always point magic link to our server callback (works in dev + prod)
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+        },
+      });
+      alert("Check your email for the magic link.");
+    } catch {
+      alert("Failed to send link. Please try again.");
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
-    <main className="max-w-sm mx-auto">
-      <h1 className="text-2xl font-semibold mb-4">EchoTab</h1>
-      <p className="text-sm text-zinc-400 mb-6">Sign in with a magic link</p>
-      <input
-        type="email"
-        placeholder="you@email.com"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        className="w-full rounded-md bg-zinc-900 border border-zinc-800 p-3 mb-3"
-      />
-      <button
-        onClick={sendMagic}
-        className="w-full rounded-md bg-white/10 hover:bg-white/20 px-4 py-2"
-      >
-        Send magic link
-      </button>
-      {sent && (
-        <p className="text-green-400 text-sm mt-3">
-          Link sent — check your email.
-        </p>
-      )}
+    <main className="max-w-sm mx-auto pt-20">
+      <h1 className="text-2xl font-semibold mb-2">EchoTab</h1>
+      <p className="text-sm text-zinc-400 mb-4">Sign in with a magic link</p>
+
+      <div className="flex gap-2">
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@email.com"
+          className="flex-1 rounded-md bg-zinc-900 border border-zinc-800 p-3"
+          onKeyDown={(e) => e.key === "Enter" && void sendMagic()}
+        />
+        <button
+          onClick={() => void sendMagic()}
+          disabled={sending || !email}
+          className={`rounded-md px-4 ${
+            sending || !email ? "bg-white/5 text-zinc-500" : "bg-white/10 hover:bg-white/20"
+          }`}
+        >
+          {sending ? "Sending…" : "Send magic link"}
+        </button>
+      </div>
     </main>
   );
 }

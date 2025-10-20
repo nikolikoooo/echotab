@@ -1,21 +1,23 @@
+import type { Metadata } from "next";
 import "./globals.css";
+import { Analytics } from "@vercel/analytics/react";
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "EchoTab",
-  description: "One message a day. A lifetime remembered.",
+  description: "One honest sentence a day. I’ll remember.",
+  viewport: "width=device-width, initial-scale=1",
+  robots: { index: true, follow: true },
 };
-
-import Header from "@/components/Header";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className="min-h-dvh bg-gradient-to-b from-zinc-950 via-zinc-950 to-black text-zinc-100 antialiased">
-        <div className="max-w-xl mx-auto px-4 py-6">
-          <Header />
-          <div className="mt-6">{children}</div>
-          <footer className="pt-10 text-xs text-zinc-600">© EchoTab</footer>
+    <html lang="en" className="h-full">
+      <body className="min-h-screen bg-black text-zinc-100 antialiased">
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          {children}
         </div>
+        {/* Privacy-friendly usage analytics */}
+        <Analytics />
       </body>
     </html>
   );
