@@ -12,7 +12,7 @@ export default function AuthCallbackPage() {
   useEffect(() => {
     (async () => {
       try {
-        // If we already have a session for any reason, just go home.
+        // If a session already exists, go home
         const s0 = await supabaseBrowser.auth.getSession();
         if (s0.data.session) {
           router.replace("/");
@@ -21,13 +21,16 @@ export default function AuthCallbackPage() {
 
         const url = new URL(window.location.href);
 
-        // 1) HASH TOKENS
+        // 1) HASH TOKENS (#access_token & #refresh_token)
         if (url.hash.includes("access_token")) {
           const frag = new URLSearchParams(url.hash.slice(1));
           const access_token = frag.get("access_token") || "";
           const refresh_token = frag.get("refresh_token") || "";
           if (access_token && refresh_token) {
-            const { error } = await supabaseBrowser.auth.setSession({ access_token, refresh_token });
+            const { error } = await supabaseBrowser.auth.setSession({
+              access_token,
+              refresh_token,
+            });
             if (!error) {
               router.replace("/");
               return;
@@ -35,7 +38,7 @@ export default function AuthCallbackPage() {
           }
         }
 
-        // 2) MAGICLINK TOKEN HASH
+        // 2) MAGICLINK (?token_hash=...&type=magiclink)
         const token_hash = url.searchParams.get("token_hash");
         const linkType = url.searchParams.get("type");
         if (token_hash && linkType === "magiclink") {
@@ -59,26 +62,27 @@ export default function AuthCallbackPage() {
           }
         }
 
-        // 3) PKCE CODE
+        // 3) PKCE (?code=...)
         const code = url.searchParams.get("code");
         if (code) {
-          const { error } = await supabaseBrowser.auth.exchangeCodeForSession(url.toString());
+          const { error } = await supabaseBrowser.auth.exchangeCodeForSession(
+            url.toString()
+          );
           if (!error) {
             router.replace("/");
             return;
           }
         }
 
-        // If we get here and now have a session (race conditions), go home
+        // If session appeared during the above steps, go home
         const s1 = await supabaseBrowser.auth.getSession();
         if (s1.data.session) {
           router.replace("/");
           return;
         }
 
-        // Last resort: go to login (but only if still not signed in)
         router.replace("/login?error=auth");
-      } catch (e) {
+      } catch {
         router.replace("/login?error=auth");
       }
     })();

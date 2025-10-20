@@ -20,29 +20,52 @@ function weekStartISO(today = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
+type ReflectionRow = {
+  id: string;
+  summary: string;
+  highlights: string[] | null;
+  mood_rollup: number | null;
+};
+
+type OpenAIChatJSON = {
+  choices?: Array<{ message?: { content?: string } }>;
+};
+
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json({ error: "config", message: "OPENAI_API_KEY missing." }, { status: 500 });
+      return NextResponse.json(
+        { error: "config", message: "OPENAI_API_KEY missing." },
+        { status: 500 }
+      );
     }
 
     const token = getAccessToken(req);
-    if (!token) return NextResponse.json({ error: "auth failed", message: "Missing access token." }, { status: 401 });
+    if (!token) {
+      return NextResponse.json(
+        { error: "auth failed", message: "Missing access token." },
+        { status: 401 }
+      );
+    }
 
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
       process.env.SUPABASE_SERVICE_ROLE as string
     );
+
     const { data: userRes, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userRes.user) {
-      return NextResponse.json({ error: "auth failed", message: "Invalid access token." }, { status: 401 });
+    if (userErr || !userRes?.user) {
+      return NextResponse.json(
+        { error: "auth failed", message: "Invalid access token." },
+        { status: 401 }
+      );
     }
     const userId = userRes.user.id;
 
     const weekStart = weekStartISO();
     const isDev = process.env.NODE_ENV !== "production";
 
-    // allow forcing a new reflection in dev via query ?force=1 or header x-dev-force: 1
+    // allow forcing regeneration in dev: ?force=1 or header x-dev-force: 1
     const force =
       isDev &&
       (req.nextUrl.searchParams.get("force") === "1" ||
@@ -56,10 +79,22 @@ export async function POST(req: NextRequest) {
         .eq("week_start", weekStart)
         .maybeSingle();
 
-      if (rErr) return NextResponse.json({ error: "db_error", message: rErr.message }, { status: 500 });
-      if (existing) return NextResponse.json({ ok: true, cached: true, reflection: existing });
+      if (rErr) {
+        return NextResponse.json(
+          { error: "db_error", message: rErr.message },
+          { status: 500 }
+        );
+      }
+      if (existing) {
+        return NextResponse.json({
+          ok: true,
+          cached: true,
+          reflection: existing as ReflectionRow,
+        });
+      }
     }
 
+    // fetch entries for week
     const weekStartDate = new Date(`${weekStart}T00:00:00.000Z`);
     const nextWeek = new Date(weekStartDate);
     nextWeek.setUTCDate(nextWeek.getUTCDate() + 7);
@@ -72,9 +107,14 @@ export async function POST(req: NextRequest) {
       .lt("created_at", nextWeek.toISOString())
       .order("created_at", { ascending: true });
 
-    if (eErr) return NextResponse.json({ error: "db_error", message: eErr.message }, { status: 500 });
+    if (eErr) {
+      return NextResponse.json({ error: "db_error", message: eErr.message }, { status: 500 });
+    }
     if (!entries || entries.length === 0) {
-      return NextResponse.json({ error: "no_entries", message: "No entries for this week." }, { status: 400 });
+      return NextResponse.json(
+        { error: "no_entries", message: "No entries for this week." },
+        { status: 400 }
+      );
     }
 
     const userText = entries.map((e) => `- ${e.content}`).join("\n");
@@ -104,21 +144,37 @@ export async function POST(req: NextRequest) {
 
     if (!aiRes.ok) {
       const txt = await aiRes.text().catch(() => "");
-      return NextResponse.json({ error: "openai_error", message: txt || aiRes.statusText }, { status: 500 });
+      return NextResponse.json(
+        { error: "openai_error", message: txt || aiRes.statusText },
+        { status: 500 }
+      );
     }
 
-    const j = (await aiRes.json()) as any;
-    let parsed: { summary?: string; highlights?: string[]; avg_mood?: number } = {};
+    const aiJson = (await aiRes.json()) as OpenAIChatJSON;
+    const content = aiJson.choices?.[0]?.message?.content ?? "{}";
+
+    let parsed: { summary?: string; highlights?: unknown; avg_mood?: unknown } = {};
     try {
-      parsed = JSON.parse(j.choices?.[0]?.message?.content ?? "{}");
-    } catch {}
+      parsed = JSON.parse(content);
+    } catch {
+      // leave parsed as empty object
+    }
+
+    const summary =
+      typeof parsed.summary === "string" ? parsed.summary : "No summary.";
+    const highlights =
+      Array.isArray(parsed.highlights)
+        ? (parsed.highlights.filter((x) => typeof x === "string") as string[]).slice(0, 5)
+        : [];
+    const mood =
+      typeof parsed.avg_mood === "number" ? parsed.avg_mood : null;
 
     const payload = {
       user_id: userId,
       week_start: weekStart,
-      summary: parsed.summary || "No summary.",
-      highlights: Array.isArray(parsed.highlights) ? parsed.highlights.slice(0, 5) : [],
-      mood_rollup: parsed.avg_mood ?? null,
+      summary,
+      highlights,
+      mood_rollup: mood,
     };
 
     const { data: saved, error: sErr } = await supabaseAdmin
@@ -127,13 +183,16 @@ export async function POST(req: NextRequest) {
       .select("id, summary, highlights, mood_rollup")
       .single();
 
-    if (sErr) return NextResponse.json({ error: "db_error", message: sErr.message }, { status: 500 });
+    if (sErr || !saved) {
+      return NextResponse.json(
+        { error: "db_error", message: sErr?.message ?? "Save failed" },
+        { status: 500 }
+      );
+    }
 
-    return NextResponse.json({ ok: true, cached: false, reflection: saved });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: "server_error", message: e?.message || "Unexpected server error." },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true, cached: false, reflection: saved as ReflectionRow });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unexpected server error.";
+    return NextResponse.json({ error: "server_error", message }, { status: 500 });
   }
 }
