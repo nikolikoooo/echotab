@@ -1,129 +1,79 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 
-const MAX_CHARS = 1000;
-const DAILY_LIMIT = 1;
+/** Build a Supabase server client that reads the session from cookies (read-only) */
+async function supabaseFromCookies() {
+  const cookieStore = await cookies(); // Next 15 route handlers -> Promise<ReadonlyRequestCookies>
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        // read-only is fine here; we only need to read the session
+        get: (name: string) => cookieStore.get(name)?.value,
+      },
+    }
+  );
+}
 
-function startOfDayUTC(d = new Date()): string {
-  const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+function startOfUTCDayISO(d = new Date()): string {
+  const x = new Date(d);
   x.setUTCHours(0, 0, 0, 0);
   return x.toISOString();
 }
-function endOfDayUTC(d = new Date()): string {
-  const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  x.setUTCDate(x.getUTCDate() + 1);
-  x.setUTCHours(0, 0, 0, 0);
-  return x.toISOString();
-}
 
-function getAccessToken(req: NextRequest): string | null {
-  const h1 = req.headers.get("sb-access-token");
-  if (h1) return h1;
-  const auth = req.headers.get("authorization");
-  if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
-  return null;
-}
-
-type InsertedEntry = { id: string; content: string; created_at: string };
+type EchoBody = { text?: string };
 
 export async function POST(req: NextRequest) {
-  try {
-    const token = getAccessToken(req);
-    if (!token) {
-      return NextResponse.json(
-        { error: "auth failed", message: "Missing access token." },
-        { status: 401 }
-      );
-    }
+  const supabase = await supabaseFromCookies();
 
-    const supabaseAdmin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL as string,
-      process.env.SUPABASE_SERVICE_ROLE as string
+  const {
+    data: { session },
+    error: sessErr,
+  } = await supabase.auth.getSession();
+  if (sessErr || !session) {
+    return NextResponse.json(
+      { error: "auth_failed", message: "Missing session" },
+      { status: 401 }
     );
-
-    const { data: userRes, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userRes?.user) {
-      return NextResponse.json(
-        { error: "auth failed", message: "Invalid access token." },
-        { status: 401 }
-      );
-    }
-    const userId = userRes.user.id;
-
-    // parse body safely
-    let text = "";
-    try {
-      const body = (await req.json()) as unknown;
-      if (
-        body &&
-        typeof body === "object" &&
-        "text" in body &&
-        typeof (body as { text?: unknown }).text === "string"
-      ) {
-        text = ((body as { text?: string }).text ?? "").trim();
-      }
-    } catch {
-      /* ignore */
-    }
-
-    if (!text) {
-      return NextResponse.json(
-        { error: "bad_request", message: "Text is required." },
-        { status: 400 }
-      );
-    }
-    if (text.length > MAX_CHARS) {
-      return NextResponse.json(
-        { error: "too_long", message: `Entry too long (max ${MAX_CHARS}).` },
-        { status: 413 }
-      );
-    }
-
-    // enforce per-day limit (in production only, dev can be noisy)
-    const isDev = process.env.NODE_ENV !== "production";
-    if (!isDev) {
-      const from = startOfDayUTC();
-      const to = endOfDayUTC();
-      const { count, error: cntErr } = await supabaseAdmin
-        .from("entries")
-        .select("*", { count: "exact", head: true })
-        .eq("user_id", userId)
-        .gte("created_at", from)
-        .lt("created_at", to);
-
-      if (cntErr) {
-        return NextResponse.json(
-          { error: "db_error", message: cntErr.message },
-          { status: 500 }
-        );
-      }
-      if ((count ?? 0) >= DAILY_LIMIT) {
-        return NextResponse.json(
-          {
-            error: "daily_limit",
-            message: "You’ve already logged today. Come back tomorrow 💛",
-          },
-          { status: 429 }
-        );
-      }
-    }
-
-    const { data: inserted, error: insErr } = await supabaseAdmin
-      .from("entries")
-      .insert({ user_id: userId, content: text })
-      .select("id, content, created_at")
-      .single();
-
-    if (insErr || !inserted) {
-      return NextResponse.json(
-        { error: "db_error", message: insErr?.message ?? "Insert failed" },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ ok: true, entry: inserted as InsertedEntry });
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unexpected server error.";
-    return NextResponse.json({ error: "server_error", message }, { status: 500 });
   }
+
+  const userId = session.user.id;
+
+  let body: EchoBody;
+  try {
+    body = (await req.json()) as EchoBody;
+  } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  const text = (body.text ?? "").trim();
+  if (!text) {
+    return NextResponse.json({ error: "missing_text" }, { status: 400 });
+  }
+
+  // Daily limit: 1 entry per UTC day
+  const since = startOfUTCDayISO();
+  const { data: today, error: todayErr } = await supabase
+    .from("entries")
+    .select("id")
+    .eq("user_id", userId)
+    .gt("created_at", since)
+    .limit(1);
+
+  if (!todayErr && today && today.length >= 1) {
+    return NextResponse.json({ error: "daily_limit" }, { status: 429 });
+  }
+
+  const { error: insertErr } = await supabase.from("entries").insert({
+    user_id: userId,
+    content: text,
+  });
+
+  if (insertErr) {
+    return NextResponse.json({ error: "save_failed" }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
 }

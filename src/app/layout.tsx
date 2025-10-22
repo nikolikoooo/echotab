@@ -1,26 +1,23 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import { Analytics } from "@vercel/analytics/react";
+import Header from "./components/Header";
 
 export const metadata: Metadata = {
   title: "EchoTab",
-  description: "One honest sentence a day. I’ll remember.",
-  robots: { index: true, follow: true },
+  description: "Say one honest sentence a day. I’ll remember.",
 };
 
 export const viewport: Viewport = {
-  width: "device-width",
-  initialScale: 1,
+  themeColor: "#0a0a0a",
   colorScheme: "dark",
-  themeColor: "#000000",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="h-full">
-      <body className="min-h-screen bg-black text-zinc-100 antialiased">
-        <div className="max-w-3xl mx-auto px-4 py-6">{children}</div>
-        <Analytics />
+    <html lang="en">
+      <body className="bg-black text-zinc-200 antialiased">
+        <Header />
+        <main className="max-w-3xl mx-auto px-4 pt-6 pb-16">{children}</main>
       </body>
     </html>
   );
